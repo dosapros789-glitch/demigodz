@@ -1,6 +1,6 @@
 {
   "name": "DemiGodz PH",
-  "description": "DemiGodz PH - Ore Calculator for Common and Epic Equipment.",
+  "description": "Official Clan Portal for DemiGodz PH (#2QQP09RLP) - Member roster, war & CWL rules, announcements, and resources.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
