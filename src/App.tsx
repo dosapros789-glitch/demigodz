@@ -16,10 +16,10 @@ export default function App() {
   const [currentLevel, setCurrentLevel] = useState<number>(1);
   const [goalLevel, setGoalLevel] = useState<number>(18);
 
-  // Owned ores (persisted across tier switches)
-  const [blueOwned, setBlueOwned] = useState<number | ''>(17116);
-  const [purpleOwned, setPurpleOwned] = useState<number | ''>(1839);
-  const [goldOwned, setGoldOwned] = useState<number | ''>(175);
+  // Owned ores (default to 0 on first load, persisted across tier switches)
+  const [blueOwned, setBlueOwned] = useState<number | ''>(0);
+  const [purpleOwned, setPurpleOwned] = useState<number | ''>(0);
+  const [goldOwned, setGoldOwned] = useState<number | ''>(0);
 
   const activeData = tier === 'common' ? COMMON_EQUIPMENT_DATA : EPIC_EQUIPMENT_DATA;
 
