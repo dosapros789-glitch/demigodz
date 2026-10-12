@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   COMMON_EQUIPMENT_DATA,
   EPIC_EQUIPMENT_DATA,
@@ -7,19 +7,80 @@ import {
 
 type EquipmentTier = 'common' | 'epic';
 
+interface SavedCalculatorState {
+  tier: EquipmentTier;
+  currentLevel: number;
+  goalLevel: number;
+  blueOwned: number;
+  purpleOwned: number;
+  goldOwned: number;
+}
+
+const STORAGE_KEY = 'demigodz_ore_calculator_state_v1';
+
+const loadInitialState = (): SavedCalculatorState => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      const tier: EquipmentTier = parsed.tier === 'epic' ? 'epic' : 'common';
+      const maxLvl = tier === 'common' ? 18 : 27;
+      const currentLevel = Math.max(1, Math.min(Number(parsed.currentLevel) || 1, maxLvl));
+      const goalLevel = Math.max(currentLevel, Math.min(Number(parsed.goalLevel) || maxLvl, maxLvl));
+
+      return {
+        tier,
+        currentLevel,
+        goalLevel,
+        blueOwned: typeof parsed.blueOwned === 'number' ? Math.max(0, parsed.blueOwned) : 0,
+        purpleOwned: typeof parsed.purpleOwned === 'number' ? Math.max(0, parsed.purpleOwned) : 0,
+        goldOwned: typeof parsed.goldOwned === 'number' ? Math.max(0, parsed.goldOwned) : 0,
+      };
+    }
+  } catch {
+    // ignore
+  }
+
+  return {
+    tier: 'common',
+    currentLevel: 1,
+    goalLevel: 18,
+    blueOwned: 0,
+    purpleOwned: 0,
+    goldOwned: 0,
+  };
+};
+
 export default function App() {
-  const [tier, setTier] = useState<EquipmentTier>('common');
+  const [tier, setTier] = useState<EquipmentTier>(() => loadInitialState().tier);
 
   // Common equipment caps at 18, Epic caps at 27
   const maxLevel = tier === 'common' ? 18 : 27;
 
-  const [currentLevel, setCurrentLevel] = useState<number>(1);
-  const [goalLevel, setGoalLevel] = useState<number>(18);
+  const [currentLevel, setCurrentLevel] = useState<number>(() => loadInitialState().currentLevel);
+  const [goalLevel, setGoalLevel] = useState<number>(() => loadInitialState().goalLevel);
 
-  // Owned ores (default to 0 on first load, persisted across tier switches)
-  const [blueOwned, setBlueOwned] = useState<number | ''>(0);
-  const [purpleOwned, setPurpleOwned] = useState<number | ''>(0);
-  const [goldOwned, setGoldOwned] = useState<number | ''>(0);
+  // Owned ores (persisted across sessions and tier switches)
+  const [blueOwned, setBlueOwned] = useState<number | ''>(() => loadInitialState().blueOwned);
+  const [purpleOwned, setPurpleOwned] = useState<number | ''>(() => loadInitialState().purpleOwned);
+  const [goldOwned, setGoldOwned] = useState<number | ''>(() => loadInitialState().goldOwned);
+
+  // Persist all latest changes to localStorage
+  useEffect(() => {
+    try {
+      const stateToSave: SavedCalculatorState = {
+        tier,
+        currentLevel,
+        goalLevel,
+        blueOwned: blueOwned === '' ? 0 : blueOwned,
+        purpleOwned: purpleOwned === '' ? 0 : purpleOwned,
+        goldOwned: goldOwned === '' ? 0 : goldOwned,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+    } catch {
+      // ignore storage errors
+    }
+  }, [tier, currentLevel, goalLevel, blueOwned, purpleOwned, goldOwned]);
 
   const activeData = tier === 'common' ? COMMON_EQUIPMENT_DATA : EPIC_EQUIPMENT_DATA;
 
@@ -59,11 +120,25 @@ export default function App() {
   const goldNeeded = required.gold - goldOwnedNum;
 
   const handleReset = () => {
+    const defaultGoal = tier === 'common' ? 18 : 27;
     setCurrentLevel(1);
-    setGoalLevel(tier === 'common' ? 18 : 27);
+    setGoalLevel(defaultGoal);
     setBlueOwned(0);
     setPurpleOwned(0);
     setGoldOwned(0);
+    try {
+      const resetState: SavedCalculatorState = {
+        tier,
+        currentLevel: 1,
+        goalLevel: defaultGoal,
+        blueOwned: 0,
+        purpleOwned: 0,
+        goldOwned: 0,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(resetState));
+    } catch {
+      // ignore
+    }
   };
 
   const levels = Array.from({ length: maxLevel }, (_, i) => i + 1);
