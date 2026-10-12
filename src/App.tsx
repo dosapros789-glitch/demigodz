@@ -58,15 +58,9 @@ export default function App() {
   const purpleNeeded = required.purple - purpleOwnedNum;
   const goldNeeded = required.gold - goldOwnedNum;
 
-  const handleResetSample = () => {
+  const handleReset = () => {
     setCurrentLevel(1);
-    setGoalLevel(18);
-    setBlueOwned(17116);
-    setPurpleOwned(1839);
-    setGoldOwned(175);
-  };
-
-  const handleClearOwned = () => {
+    setGoalLevel(tier === 'common' ? 18 : 27);
     setBlueOwned(0);
     setPurpleOwned(0);
     setGoldOwned(0);
@@ -91,14 +85,7 @@ export default function App() {
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               type="button"
-              onClick={handleClearOwned}
-              className="px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-            >
-              Clear
-            </button>
-            <button
-              type="button"
-              onClick={handleResetSample}
+              onClick={handleReset}
               className="px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs font-semibold text-sky-400 hover:text-sky-300 bg-sky-950/60 hover:bg-sky-900/60 border border-sky-800/60 rounded-lg transition-colors"
             >
               Reset
