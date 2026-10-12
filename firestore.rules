@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(docId) {
+      return docId is string && docId.size() > 0 && docId.size() <= 100 && docId.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidAnnouncement(data) {
+      return data.keys().hasAll(['title', 'content', 'category', 'date', 'author'])
+        && data.keys().hasOnly(['title', 'content', 'category', 'date', 'author', 'isPinned', 'createdAt'])
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 150
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 5000
+        && data.category in ['CWL', 'War', 'Raid', 'General']
+        && data.date is string && data.date.size() <= 30
+        && data.author is string && data.author.size() >= 1 && data.author.size() <= 100
+        && (!('isPinned' in data) || data.isPinned is bool)
+        && (!('createdAt' in data) || data.createdAt is number);
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow create: if isValidId(announcementId) && isValidAnnouncement(request.resource.data);
+      allow update: if isValidId(announcementId) && isValidAnnouncement(request.resource.data);
+      allow delete: if isValidId(announcementId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "ClanAnnouncement": {
+      "title": "ClanAnnouncement",
+      "description": "An announcement published for the Demi GoDz PH clan, synchronized across all devices.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Announcement title header",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "content": {
+          "type": "string",
+          "description": "Announcement body message or briefing",
+          "minLength": 1,
+          "maxLength": 5000
+        },
+        "category": {
+          "type": "string",
+          "description": "Category of notice",
+          "enum": ["CWL", "War", "Raid", "General"]
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO date string or YYYY-MM-DD",
+          "maxLength": 30
+        },
+        "isPinned": {
+          "type": "boolean",
+          "description": "Whether the notice is pinned to top"
+        },
+        "author": {
+          "type": "string",
+          "description": "Name or title of leader/co-leader who posted",
+          "maxLength": 100
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Unix timestamp in ms when created"
+        }
+      },
+      "required": ["title", "content", "category", "date", "author"]
+    }
+  },
+  "firestore": {
+    "/announcements/{announcementId}": {
+      "schema": "ClanAnnouncement",
+      "description": "Live announcements synced across all clan members and devices."
+    }
+  }
+}

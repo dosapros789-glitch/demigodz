@@ -12,6 +12,12 @@ import {
   ClanAnnouncement,
 } from './data/clanData';
 import { fetchLiveClanData } from './services/cocApi';
+import {
+  subscribeToAnnouncements,
+  publishAnnouncementToFirestore,
+  deleteAnnouncementFromFirestore,
+  testFirestoreConnection,
+} from './services/firebase';
 
 type HubTab = 'home' | 'calculator' | 'roster' | 'announcements' | 'rules' | 'hallOfFame';
 type EquipmentTier = 'common' | 'epic';
@@ -27,6 +33,9 @@ interface SavedCalculatorState {
 
 const CALC_STORAGE_KEY = 'demigodz_ore_calculator_state_v1';
 const ANNOUNCEMENTS_STORAGE_KEY = 'demigodz_announcements_v1';
+const ADMIN_PASSWORD = 'macmacmac1';
+const ADMIN_STORAGE_KEY = 'demigodz_admin_authenticated';
+const ACKNOWLEDGED_STORAGE_KEY = 'demigodz_acknowledged_announcements_v1';
 
 const loadSavedCalculator = (): SavedCalculatorState => {
   try {
@@ -78,6 +87,26 @@ export default function App() {
     return INITIAL_ANNOUNCEMENTS;
   });
 
+  // Acknowledged Announcements State
+  const [acknowledgedIds, setAcknowledgedIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(ACKNOWLEDGED_STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return [];
+  });
+  const [previewNotice, setPreviewNotice] = useState<ClanAnnouncement | null>(null);
+
+  // Unacknowledged announcements (ordered as in announcements array)
+  const unacknowledgedAnnouncements = useMemo(() => {
+    return announcements.filter((a) => !acknowledgedIds.includes(a.id));
+  }, [announcements, acknowledgedIds]);
+
+  const activeMandatoryNotice = unacknowledgedAnnouncements[0] || null;
+  const activePopupNotice = activeMandatoryNotice || previewNotice;
+
   // Roster Filters
   const [rosterSearch, setRosterSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'leader' | 'coLeader' | 'admin' | 'member'>('all');
@@ -90,6 +119,21 @@ export default function App() {
   const [newAnnCategory, setNewAnnCategory] = useState<'CWL' | 'War' | 'Raid' | 'General'>('General');
   const [newAnnAuthor, setNewAnnAuthor] = useState('♣♠MaC.SmurF♠♣ (Leader)');
 
+  // Admin Authorization State for Announcements
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem(ADMIN_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
+  const [showAdminProfileModal, setShowAdminProfileModal] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState('');
+  const [adminPasswordError, setAdminPasswordError] = useState('');
+  const [showPasswordText, setShowPasswordText] = useState(false);
+  const [pendingPostAction, setPendingPostAction] = useState(false);
+
   // Toast Feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -97,6 +141,32 @@ export default function App() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
+
+  // Realtime Firebase Announcements Synchronization
+  const [isFirebaseSyncing, setIsFirebaseSyncing] = useState(false);
+
+  useEffect(() => {
+    testFirestoreConnection();
+    // Subscribe to cloud announcements
+    const unsubscribe = subscribeToAnnouncements(
+      (cloudAnnouncements) => {
+        if (cloudAnnouncements && cloudAnnouncements.length > 0) {
+          // Merge or prioritize cloud announcements, falling back to initial ones if needed
+          setAnnouncements(cloudAnnouncements);
+          try {
+            localStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cloudAnnouncements));
+          } catch {
+            // ignore
+          }
+        }
+      },
+      (error) => {
+        console.warn('Realtime announcements subscription notice:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
 
   // Live Sync with Supercell API on mount
   useEffect(() => {
@@ -220,8 +290,59 @@ export default function App() {
   }, [clanInfo.memberList]);
 
 
-  const handleCreateAnnouncement = (e: React.FormEvent) => {
+  const handleAdminLoginSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (adminPasswordInput === ADMIN_PASSWORD) {
+      setIsAdmin(true);
+      try {
+        sessionStorage.setItem(ADMIN_STORAGE_KEY, 'true');
+      } catch {
+        // ignore
+      }
+      setShowAdminLoginModal(false);
+      setAdminPasswordInput('');
+      setAdminPasswordError('');
+      showToast('Admin verified! You can now post and delete announcements.');
+
+      if (pendingPostAction) {
+        setShowNewAnnModal(true);
+        setPendingPostAction(false);
+      }
+    } else {
+      setAdminPasswordError('Incorrect password. Access denied.');
+    }
+  };
+
+  const handleAdminLogout = () => {
+    setIsAdmin(false);
+    try {
+      sessionStorage.removeItem(ADMIN_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setShowAdminProfileModal(false);
+    showToast('Logged out of Admin mode.');
+  };
+
+  const handleOpenPostNotice = () => {
+    if (isAdmin) {
+      setShowNewAnnModal(true);
+    } else {
+      setPendingPostAction(true);
+      setAdminPasswordInput('');
+      setAdminPasswordError('');
+      setShowAdminLoginModal(true);
+    }
+  };
+
+  const handleCreateAnnouncement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) {
+      showToast('Admin password required to post announcements.');
+      setPendingPostAction(true);
+      setShowAdminLoginModal(true);
+      return;
+    }
     if (!newAnnTitle.trim() || !newAnnContent.trim()) return;
 
     const newEntry: ClanAnnouncement = {
@@ -234,7 +355,9 @@ export default function App() {
       author: newAnnAuthor.trim() || 'Leader',
     };
 
-    const updated = [newEntry, ...announcements];
+    setIsFirebaseSyncing(true);
+    // Optimistically update UI
+    const updated = [newEntry, ...announcements.filter((a) => a.id !== newEntry.id)];
     setAnnouncements(updated);
     try {
       localStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(updated));
@@ -242,10 +365,80 @@ export default function App() {
       // ignore
     }
 
+    // Auto-acknowledge for author so they don't get blocked by their own message
+    setAcknowledgedIds((prev) => {
+      const next = prev.includes(newEntry.id) ? prev : [...prev, newEntry.id];
+      try {
+        localStorage.setItem(ACKNOWLEDGED_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+
+    try {
+      await publishAnnouncementToFirestore(newEntry);
+      showToast('Announcement published & synced to all devices!');
+    } catch (err) {
+      console.error('Failed to sync to Firestore:', err);
+      showToast('Notice saved locally; cloud sync will retry.');
+    } finally {
+      setIsFirebaseSyncing(false);
+    }
+
     setNewAnnTitle('');
     setNewAnnContent('');
     setShowNewAnnModal(false);
-    showToast('New announcement published!');
+  };
+
+  const handleAcknowledgeAnnouncement = (id: string) => {
+    setAcknowledgedIds((prev) => {
+      if (prev.includes(id)) return prev;
+      const next = [...prev, id];
+      try {
+        localStorage.setItem(ACKNOWLEDGED_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+    if (previewNotice?.id === id) {
+      setPreviewNotice(null);
+    }
+    showToast('Notice acknowledged. Thank you, Chief!');
+  };
+
+  const handleAcknowledgeAllAnnouncements = () => {
+    const allIds = announcements.map((a) => a.id);
+    setAcknowledgedIds((prev) => {
+      const merged = Array.from(new Set([...prev, ...allIds]));
+      try {
+        localStorage.setItem(ACKNOWLEDGED_STORAGE_KEY, JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
+      return merged;
+    });
+    setPreviewNotice(null);
+    showToast('All clan notices acknowledged!');
+  };
+
+  const handleDeleteAnnouncement = async (id: string) => {
+    if (!isAdmin) {
+      showToast('Admin password required to delete announcements.');
+      setShowAdminLoginModal(true);
+      return;
+    }
+    if (!window.confirm('Are you sure you want to delete this announcement?')) {
+      return;
+    }
+    setAnnouncements((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await deleteAnnouncementFromFirestore(id);
+      showToast('Announcement removed.');
+    } catch (err) {
+      console.error('Failed to delete announcement from Firestore:', err);
+    }
   };
 
   const handleCopyClanTag = () => {
@@ -347,26 +540,6 @@ export default function App() {
               Overview
             </button>
             <button
-              onClick={() => setActiveTab('roster')}
-              className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-                activeTab === 'roster'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
-            >
-              Member Roster ({clanInfo.memberList.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('rules')}
-              className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-                activeTab === 'rules'
-                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
-            >
-              War & CWL Rules
-            </button>
-            <button
               onClick={() => setActiveTab('announcements')}
               className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
                 activeTab === 'announcements'
@@ -385,6 +558,26 @@ export default function App() {
               }`}
             >
               Hall of Fame
+            </button>
+            <button
+              onClick={() => setActiveTab('rules')}
+              className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
+                activeTab === 'rules'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              War & CWL Rules
+            </button>
+            <button
+              onClick={() => setActiveTab('roster')}
+              className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
+                activeTab === 'roster'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              Member Roster ({clanInfo.memberList.length})
             </button>
             <button
               onClick={() => setActiveTab('calculator')}
@@ -547,7 +740,7 @@ export default function App() {
                     Official Clan Roster
                   </h3>
                   <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                    Explore all 38 verified members with live Town Hall levels, clan ranks, trophies, and seasonal donation totals.
+                    Explore all 38 verified members with live Town Hall levels, clan ranks, ranked league tiers, and seasonal donations.
                   </p>
                 </div>
                 <span className="inline-flex items-center text-xs font-semibold text-emerald-400 group-hover:translate-x-1 transition-transform">
@@ -593,21 +786,44 @@ export default function App() {
               </div>
 
               {announcements[0] && (
-                <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
-                      {announcements[0].category}
-                    </span>
-                    <h4 className="font-bold text-white text-sm">
-                      {announcements[0].title}
-                    </h4>
+                <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
+                        {announcements[0].category}
+                      </span>
+                      <h4 className="font-bold text-white text-sm">
+                        {announcements[0].title}
+                      </h4>
+                    </div>
+                    {acknowledgedIds.includes(announcements[0].id) ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-1">
+                        <span>✓</span>
+                        <span>Acknowledged</span>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleAcknowledgeAnnouncement(announcements[0].id)}
+                        className="px-2.5 py-0.5 rounded text-[10px] font-bold text-amber-300 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 flex items-center gap-1 cursor-pointer"
+                      >
+                        <span>⚠️</span>
+                        <span>Acknowledge Notice</span>
+                      </button>
+                    )}
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">
                     {announcements[0].content}
                   </p>
                   <div className="pt-2 flex items-center justify-between text-[11px] text-slate-500 font-mono">
                     <span>By: {announcements[0].author}</span>
-                    <span>{announcements[0].date}</span>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewNotice(announcements[0])}
+                      className="text-amber-400 hover:text-amber-300 text-xs font-sans font-medium"
+                    >
+                      Read Briefing Modal ↗
+                    </button>
                   </div>
                 </div>
               )}
@@ -891,7 +1107,7 @@ export default function App() {
                   Clan Member Directory
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Official roster showing Town Hall levels, roles, and donations
+                  Official roster showing Town Hall levels, ranked league tiers, and seasonal donations
                 </p>
               </div>
 
@@ -950,7 +1166,7 @@ export default function App() {
                       <th className="py-3 px-3 sm:px-4 text-left">Rank & Member</th>
                       <th className="py-3 px-3 sm:px-4 text-center">Town Hall</th>
                       <th className="py-3 px-3 sm:px-4 text-center">Role</th>
-                      <th className="py-3 px-3 sm:px-4 text-right">Trophies</th>
+                      <th className="py-3 px-3 sm:px-4 text-right">League Tier / Trophies</th>
                       <th className="py-3 px-3 sm:px-4 text-right">Donations</th>
                     </tr>
                   </thead>
@@ -1016,9 +1232,45 @@ export default function App() {
                             </span>
                           </td>
 
-                          {/* Trophies */}
-                          <td className="py-3 px-3 sm:px-4 text-right text-slate-200 font-semibold">
-                            🏆 {member.trophies.toLocaleString()}
+                          {/* League Tier & Trophies */}
+                          <td className="py-3 px-3 sm:px-4 text-right">
+                            <div className="flex flex-col items-end gap-1">
+                              {member.leagueTier && member.leagueTier.name !== 'Unranked' ? (
+                                <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/80 shadow-xs">
+                                  {member.leagueTier.iconUrls?.small && (
+                                    <img
+                                      src={member.leagueTier.iconUrls.small}
+                                      alt={member.leagueTier.name}
+                                      className="w-4 h-4 object-contain shrink-0"
+                                    />
+                                  )}
+                                  <span className="text-[11px] font-bold text-amber-300 font-sans tracking-tight">
+                                    {member.leagueTier.name}
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="text-[11px] text-slate-500 font-sans">
+                                  Unranked
+                                </span>
+                              )}
+
+                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 justify-end">
+                                {member.trophies > 0 ? (
+                                  <span className="text-amber-400 font-semibold" title="Home Village Trophies">
+                                    🏆 {member.trophies.toLocaleString()}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500 text-[10px]" title="Ranked League system active / Season reset">
+                                    Season Reset
+                                  </span>
+                                )}
+                                {typeof member.builderBaseTrophies === 'number' && member.builderBaseTrophies > 0 && (
+                                  <span className="text-indigo-300/80 text-[10px]" title="Builder Base Trophies">
+                                    ⚔️ {member.builderBaseTrophies.toLocaleString()} BB
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </td>
 
                           {/* Donations */}
@@ -1110,30 +1362,82 @@ export default function App() {
         {/* ==================================================== */}
         {activeTab === 'announcements' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
                 <h2 className="text-lg font-bold text-white tracking-tight">
                   Clan Announcements & War Notices
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Official notices from Demi GoDz PH leadership
+                  Official notices from Demi GoDz PH leadership — visible across all member devices
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setShowNewAnnModal(true)}
-                className="px-3.5 py-2 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
-              >
-                <span>+ Post Notice</span>
-              </button>
+              <div className="flex items-center gap-2.5">
+                {/* Admin Profile Icon Button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isAdmin) {
+                      setShowAdminProfileModal(true);
+                    } else {
+                      setPendingPostAction(false);
+                      setAdminPasswordError('');
+                      setAdminPasswordInput('');
+                      setShowAdminLoginModal(true);
+                    }
+                  }}
+                  className={`group relative flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all ${
+                    isAdmin
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_15px_-3px_rgba(245,158,11,0.25)]'
+                      : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:border-slate-500 hover:bg-slate-800'
+                  }`}
+                  title={isAdmin ? 'Clan Admin (Active) — Click to view profile' : 'Clan Admin Login — Click to enter password'}
+                >
+                  <div className="relative">
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs ${
+                      isAdmin
+                        ? 'bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 ring-2 ring-amber-400/50 shadow-sm'
+                        : 'bg-slate-800 text-slate-300 ring-1 ring-slate-700'
+                    }`}>
+                      {isAdmin ? (
+                        <span className="text-xs">👑</span>
+                      ) : (
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
+                        </svg>
+                      )}
+                    </div>
+                    {/* Active / Idle dot */}
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-slate-900 ${
+                      isAdmin ? 'bg-emerald-400' : 'bg-slate-500'
+                    }`} />
+                  </div>
+                  <div className="text-left text-xs">
+                    <div className="font-bold leading-tight flex items-center gap-1">
+                      <span>{isAdmin ? 'Admin' : 'Admin Login'}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 leading-tight">
+                      {isAdmin ? 'Active' : 'Password'}
+                    </div>
+                  </div>
+                </button>
+
+                {/* Post Notice Button */}
+                <button
+                  type="button"
+                  onClick={handleOpenPostNotice}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                >
+                  <span>+ Post Notice</span>
+                </button>
+              </div>
             </div>
 
             <div className="space-y-4">
               {announcements.map((ann) => (
                 <div
                   key={ann.id}
-                  className={`p-5 rounded-xl border bg-slate-900/70 backdrop-blur-sm transition-all ${
+                  className={`p-5 rounded-xl border bg-slate-900/70 backdrop-blur-sm transition-all relative group ${
                     ann.isPinned
                       ? 'border-amber-500/50 shadow-[0_0_20px_-5px_rgba(245,158,11,0.15)]'
                       : 'border-slate-800'
@@ -1153,117 +1457,59 @@ export default function App() {
                         {ann.title}
                       </h3>
                     </div>
-                    <span className="text-xs text-slate-400 font-mono">
-                      {ann.date}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-slate-400 font-mono">
+                        {ann.date}
+                      </span>
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteAnnouncement(ann.id)}
+                          title="Delete announcement (Admin only)"
+                          className="text-slate-500 hover:text-rose-400 transition-colors text-xs p-1 rounded hover:bg-rose-950/40"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">
                     {ann.content}
                   </p>
 
-                  <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+                  <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
                     <span>
                       Posted by: <strong className="text-slate-200">{ann.author}</strong>
                     </span>
+                    <div className="flex items-center gap-2">
+                      {acknowledgedIds.includes(ann.id) ? (
+                        <span className="text-[11px] text-emerald-400 flex items-center gap-1 font-medium bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                          <span>✓</span>
+                          <span>Acknowledged</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleAcknowledgeAnnouncement(ann.id)}
+                          className="text-[11px] text-amber-300 hover:text-amber-200 flex items-center gap-1 font-medium bg-amber-500/20 hover:bg-amber-500/30 px-2.5 py-0.5 rounded border border-amber-500/40 transition-all cursor-pointer"
+                        >
+                          <span>⚠️</span>
+                          <span>Acknowledge Notice</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setPreviewNotice(ann)}
+                        className="text-[11px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                      >
+                        Briefing View ↗
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
-
-            {/* Post Modal */}
-            {showNewAnnModal && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-base font-bold text-white">
-                      New Clan Announcement
-                    </h3>
-                    <button
-                      type="button"
-                      onClick={() => setShowNewAnnModal(false)}
-                      className="text-slate-400 hover:text-white"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <form onSubmit={handleCreateAnnouncement} className="space-y-4 text-xs">
-                    <div>
-                      <label className="block font-medium text-slate-300 mb-1">
-                        Category
-                      </label>
-                      <select
-                        value={newAnnCategory}
-                        onChange={(e) => setNewAnnCategory(e.target.value as any)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
-                      >
-                        <option value="CWL">CWL</option>
-                        <option value="War">Classic War</option>
-                        <option value="Raid">Raid Weekend</option>
-                        <option value="General">General</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block font-medium text-slate-300 mb-1">
-                        Title
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. Master I CWL Round 3 Strategy"
-                        value={newAnnTitle}
-                        onChange={(e) => setNewAnnTitle(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:border-amber-400 focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-medium text-slate-300 mb-1">
-                        Content / Instructions
-                      </label>
-                      <textarea
-                        required
-                        rows={4}
-                        placeholder="Write your announcement details here..."
-                        value={newAnnContent}
-                        onChange={(e) => setNewAnnContent(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:border-amber-400 focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-medium text-slate-300 mb-1">
-                        Author Name & Role
-                      </label>
-                      <input
-                        type="text"
-                        value={newAnnAuthor}
-                        onChange={(e) => setNewAnnAuthor(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2 pt-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowNewAnnModal(false)}
-                        className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg hover:bg-slate-700"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="submit"
-                        className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg shadow"
-                      >
-                        Publish Notice
-                      </button>
-                    </div>
-                  </form>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -1418,6 +1664,415 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* ==================================================== */}
+      {/* PERSISTENT ANNOUNCEMENT POPUP MODAL */}
+      {/* ==================================================== */}
+      {activePopupNotice && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-md animate-in fade-in"
+          // Crucial: Backdrop click does NOT dismiss to ensure persistence
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border-2 border-amber-500/60 rounded-2xl max-w-lg w-full p-5 sm:p-7 space-y-4 sm:space-y-5 shadow-[0_0_60px_-10px_rgba(245,158,11,0.35)] animate-in zoom-in-95"
+          >
+            {/* Top Alert Bar */}
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-xl text-amber-400 shrink-0 shadow-inner">
+                  📢
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-black tracking-wider uppercase px-2 py-0.5 rounded bg-amber-500 text-slate-950">
+                      Clan Briefing
+                    </span>
+                    {unacknowledgedAnnouncements.length > 1 && (
+                      <span className="text-[11px] font-mono text-amber-300 font-bold bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/60">
+                        Notice 1 of {unacknowledgedAnnouncements.length} Unread
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-xs sm:text-sm font-semibold text-slate-300 mt-1">
+                    {activeMandatoryNotice
+                      ? 'Action Required: Official Leadership Broadcast'
+                      : 'Announcement Preview Archive'}
+                  </h3>
+                </div>
+              </div>
+
+              {/* Close button only shown when voluntarily reviewing an already acknowledged announcement */}
+              {!activeMandatoryNotice && previewNotice && (
+                <button
+                  type="button"
+                  onClick={() => setPreviewNotice(null)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+                  title="Close briefing"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Announcement Details */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider rounded border ${
+                    activePopupNotice.category === 'CWL'
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                      : activePopupNotice.category === 'War'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : activePopupNotice.category === 'Raid'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  }`}
+                >
+                  {activePopupNotice.category}
+                </span>
+                {activePopupNotice.isPinned && (
+                  <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    📌 Pinned
+                  </span>
+                )}
+                <span className="text-xs text-slate-400 font-mono ml-auto">
+                  {activePopupNotice.date}
+                </span>
+              </div>
+
+              <h2 className="text-lg sm:text-xl font-black text-white tracking-tight leading-snug">
+                {activePopupNotice.title}
+              </h2>
+
+              <div className="p-4 sm:p-5 rounded-xl bg-slate-950/90 border border-slate-800 text-slate-200 text-xs sm:text-sm leading-relaxed whitespace-pre-line max-h-56 overflow-y-auto font-sans shadow-inner">
+                {activePopupNotice.content}
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-slate-400 pt-1">
+                <span>
+                  Authorized by: <strong className="text-amber-300">{activePopupNotice.author}</strong>
+                </span>
+                <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Demi GoDz PH Official
+                </span>
+              </div>
+            </div>
+
+            {/* Persistent mandate notice banner */}
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-[11px] text-amber-200/90 leading-relaxed flex items-center gap-2.5">
+              <span className="text-base shrink-0">🛡️</span>
+              <span>
+                {activeMandatoryNotice
+                  ? 'This pop up is persistent until acknowledged to ensure all members and visitors have read active clan instructions.'
+                  : 'You have already acknowledged this announcement.'}
+              </span>
+            </div>
+
+            {/* Acknowledge Button Actions */}
+            <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleAcknowledgeAnnouncement(activePopupNotice.id)}
+                className="w-full py-3 sm:py-3.5 px-4 rounded-xl font-black text-slate-950 bg-gradient-to-r from-amber-400 via-amber-300 to-amber-500 hover:from-amber-300 hover:to-amber-400 shadow-[0_0_25px_-5px_rgba(245,158,11,0.5)] transition-all flex items-center justify-center gap-2 text-xs sm:text-sm tracking-wide active:scale-[0.99] cursor-pointer"
+              >
+                <span className="text-base">✓</span>
+                <span>
+                  {acknowledgedIds.includes(activePopupNotice.id)
+                    ? 'Acknowledged (Click to Confirm)'
+                    : 'I Have Read & Acknowledge This Notice'}
+                </span>
+                {unacknowledgedAnnouncements.length > 1 && (
+                  <span className="text-[11px] bg-slate-950/25 px-2 py-0.5 rounded-full font-bold ml-1">
+                    ({unacknowledgedAnnouncements.length} left)
+                  </span>
+                )}
+              </button>
+
+              {unacknowledgedAnnouncements.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleAcknowledgeAllAnnouncements}
+                  className="w-full py-2 px-3 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-950/80 hover:bg-slate-800 rounded-lg transition-colors border border-slate-800 text-center"
+                >
+                  Acknowledge All ({unacknowledgedAnnouncements.length}) Pending Notices
+                </button>
+              )}
+
+              {!activeMandatoryNotice && previewNotice && (
+                <button
+                  type="button"
+                  onClick={() => setPreviewNotice(null)}
+                  className="w-full py-2 px-3 text-xs font-medium text-slate-400 hover:text-slate-300 bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors text-center"
+                >
+                  Close Briefing
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* ADMIN PASSWORD LOGIN MODAL */}
+      {/* ==================================================== */}
+      {showAdminLoginModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  🔒
+                </div>
+                <h3 className="text-base font-bold text-white">
+                  Admin Verification
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAdminLoginModal(false);
+                  setPendingPostAction(false);
+                  setAdminPasswordError('');
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Enter the admin password to publish and delete clan announcements.
+            </p>
+
+            <form onSubmit={handleAdminLoginSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Admin Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPasswordText ? 'text' : 'password'}
+                    autoFocus
+                    required
+                    value={adminPasswordInput}
+                    onChange={(e) => {
+                      setAdminPasswordInput(e.target.value);
+                      setAdminPasswordError('');
+                    }}
+                    placeholder="Enter admin password..."
+                    className={`w-full bg-slate-950 border ${
+                      adminPasswordError ? 'border-rose-500' : 'border-slate-700 focus:border-amber-400'
+                    } rounded-lg px-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none pr-10`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPasswordText(!showPasswordText)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-xs p-1"
+                  >
+                    {showPasswordText ? '🙈' : '👁️'}
+                  </button>
+                </div>
+                {adminPasswordError && (
+                  <p className="text-[11px] text-rose-400 mt-1.5 font-medium flex items-center gap-1">
+                    <span>⚠️</span>
+                    <span>{adminPasswordError}</span>
+                  </p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAdminLoginModal(false);
+                    setPendingPostAction(false);
+                    setAdminPasswordError('');
+                  }}
+                  className="px-3.5 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                >
+                  <span>Unlock Admin</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* ADMIN PROFILE DETAILS MODAL */}
+      {/* ==================================================== */}
+      {showAdminProfileModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 font-bold flex items-center justify-center text-lg shadow-md">
+                  👑
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Clan Administrator
+                  </h3>
+                  <span className="text-[11px] text-emerald-400 font-medium flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Authenticated Session
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdminProfileModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5 text-xs text-slate-300">
+              <p className="font-semibold text-slate-200">Admin Privileges:</p>
+              <div className="space-y-1 text-slate-400 text-[11px]">
+                <div className="flex items-center gap-1.5 text-emerald-400">
+                  <span>✓</span>
+                  <span>Post announcements to all member devices</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-emerald-400">
+                  <span>✓</span>
+                  <span>Delete announcements & war notices</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <button
+                type="button"
+                onClick={handleAdminLogout}
+                className="px-3 py-1.5 text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/30 rounded-lg transition-colors border border-rose-900/50"
+              >
+                Log Out
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAdminProfileModal(false);
+                  setShowNewAnnModal(true);
+                }}
+                className="px-3.5 py-1.5 text-xs font-semibold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-lg transition-colors"
+              >
+                + New Notice
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* POST NEW ANNOUNCEMENT MODAL */}
+      {/* ==================================================== */}
+      {showNewAnnModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white">
+                New Clan Announcement
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowNewAnnModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateAnnouncement} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Category
+                </label>
+                <select
+                  value={newAnnCategory}
+                  onChange={(e) => setNewAnnCategory(e.target.value as any)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
+                >
+                  <option value="CWL">CWL</option>
+                  <option value="War">Classic War</option>
+                  <option value="Raid">Raid Weekend</option>
+                  <option value="General">General</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Master I CWL Round 3 Strategy"
+                  value={newAnnTitle}
+                  onChange={(e) => setNewAnnTitle(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:border-amber-400 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Content / Instructions
+                </label>
+                <textarea
+                  required
+                  rows={4}
+                  placeholder="Write your announcement details here..."
+                  value={newAnnContent}
+                  onChange={(e) => setNewAnnContent(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:border-amber-400 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Author Name & Role
+                </label>
+                <input
+                  type="text"
+                  value={newAnnAuthor}
+                  onChange={(e) => setNewAnnAuthor(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewAnnModal(false)}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg hover:bg-slate-700"
+                  disabled={isFirebaseSyncing}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isFirebaseSyncing}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold rounded-lg shadow flex items-center gap-1.5"
+                >
+                  {isFirebaseSyncing && (
+                    <span className="w-3.5 h-3.5 border-2 border-slate-900 border-t-transparent rounded-full animate-spin"></span>
+                  )}
+                  <span>{isFirebaseSyncing ? 'Syncing to Cloud...' : 'Publish Notice'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toastMessage && (

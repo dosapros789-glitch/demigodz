@@ -11,10 +11,20 @@ export interface ClanMember {
   donations: number;
   donationsReceived: number;
   warStars?: number;
+  builderBaseTrophies?: number;
+  leagueTier?: {
+    id: number;
+    name: string;
+    iconUrls?: { small: string; large?: string };
+  };
   league?: {
     id: number;
     name: string;
     iconUrls?: { small: string; tiny: string; medium?: string };
+  };
+  builderBaseLeague?: {
+    id: number;
+    name: string;
   };
 }
 
